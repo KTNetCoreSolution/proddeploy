@@ -1,0 +1,295 @@
+name: Deploy Frontend and Backend (Prod)
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  BASE_DIR: D:/workspace/netcore
+  FRONTEND_SOURCE_DIR: D:/workspace/netcore/source/frontend
+  BACKEND_SOURCE_DIR: D:/workspace/netcore/source/backend
+  BACKUP_DIR: D:/workspace/netcore/backup
+  DEPLOY_DIR: D:/workspace/netcore/deploy/backend
+  FRONTEND_REPO_URL: https://${{ secrets.GITHUB_ACTOR }}:${{ secrets.KTNETCOREACTION }}@github.com/KTNetCoreSolution/frontend.git
+  BACKEND_REPO_URL: https://${{ secrets.GITHUB_ACTOR }}:${{ secrets.KTNETCOREACTION }}@github.com/KTNetCoreSolution/backend.git
+  BACKEND_SERVICE_NAME: Run_backend_service
+  NGINX_SERVICE_NAME: Nginx
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  deploy-all:
+    runs-on: [self-hosted, Windows, X64, deploy-prod]
+
+    steps:
+      ### 1. Node.js 버전 확인
+      - name: Verify Node.js Installation
+        shell: powershell
+        run: |
+          Write-Output "🔍 Verifying installed Node.js and npm versions..."
+          node -v
+          npm -v
+          $currentVersion = node -v
+          if (-not ($currentVersion -match "^v22\.")) {
+              Write-Error "❌ Node.js v22.x is required. Current version: $currentVersion"
+              exit 1
+          }
+
+      ### 2. Java 환경 확인
+      - name: Verify Java Environment
+        shell: powershell
+        run: |
+          Write-Output "🔍 Checking Java environment..."
+          java -version
+          If ($?) {
+              Write-Output "✅ Java installation verified."
+          } Else {
+              Write-Error "❌ Java is not installed or incorrectly configured. Please check the environment."
+              exit 1
+          }
+
+      ### 3. Git Safe Directory 설정
+      - name: Add Safe Directory
+        shell: powershell
+        run: |
+          git config --global --add safe.directory ${{ env.FRONTEND_SOURCE_DIR }}
+          git config --global --add safe.directory ${{ env.BACKEND_SOURCE_DIR }}
+          Write-Output "✅ Git safe directories added: ${{ env.FRONTEND_SOURCE_DIR }}, ${{ env.BACKEND_SOURCE_DIR }}"
+
+      ### 4. 현재 소스 코드 백업
+      - name: Backup Current Source
+        shell: powershell
+        run: |
+          function Backup-Files {
+              param([string]$SourcePath, [string]$BackupPath, [bool]$HandleLockedFiles = $false)
+              $currentMonthDir = Join-Path -Path $BackupPath -ChildPath (Get-Date -Format 'yyyyMM')
+              if (-not (Test-Path -Path $currentMonthDir)) {
+                  New-Item -ItemType Directory -Path $currentMonthDir -Force
+              }
+              $currentTime = "$(Get-Date -Format 'yyyyMMdd-HHmmss').zip"
+              $backupFilePath = Join-Path -Path $currentMonthDir -ChildPath $currentTime
+              $tempDir = Join-Path -Path $env:TEMP -ChildPath "BackupTemp"
+              if (Test-Path $tempDir) {
+                  Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              New-Item -ItemType Directory -Path $tempDir -Force
+              if ($HandleLockedFiles) {
+                  # 백엔드 및 배포 디렉터리: 잠긴 파일 처리, build와 .gradle 제외
+                  Get-ChildItem -Path $SourcePath -Recurse -Force |
+                      Where-Object { -not ($_.FullName -like '*\build\*') -and -not ($_.FullName -like '*\.gradle\*') -and -not ($_.PSIsContainer -and ($_.Name -eq 'build' -or $_.Name -eq '.gradle')) } |
+                      ForEach-Object {
+                          $destinationPath = Join-Path -Path $tempDir -ChildPath ($_.FullName.Substring($SourcePath.Length).TrimStart('\'))
+                          $destinationDir = Split-Path -Path $destinationPath -Parent
+                          if (-not (Test-Path -Path $destinationDir)) {
+                              New-Item -ItemType Directory -Path $destinationDir -Force
+                          }
+                          try {
+                              Copy-Item -Path $_.FullName -Destination $destinationPath -Recurse -Force -ErrorAction Stop
+                          } catch {
+                              Write-Output "⚠️ Locked file skipped: $($_.FullName)"
+                          }
+                      }
+              } else {
+                  # 프론트엔드: node_modules 제외
+                  Get-ChildItem -Path $SourcePath -Recurse -Force |
+                      Where-Object { -not ($_.FullName -like '*\node_modules\*') -and -not ($_.PSIsContainer -and $_.Name -eq 'node_modules') } |
+                      ForEach-Object {
+                          $destinationPath = Join-Path -Path $tempDir -ChildPath ($_.FullName.Substring($SourcePath.Length).TrimStart('\'))
+                          $destinationDir = Split-Path -Path $destinationPath -Parent
+                          if (-not (Test-Path -Path $destinationDir)) {
+                              New-Item -ItemType Directory -Path $destinationDir -Force
+                          }
+                          Copy-Item -Path $_.FullName -Destination $destinationPath -Recurse -Force
+                      }
+              }
+              Compress-Archive -Path "$tempDir\*" -DestinationPath $backupFilePath -Force
+              Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Output "✅ Backup completed at $backupFilePath"
+          }
+          Backup-Files -SourcePath "${{ env.FRONTEND_SOURCE_DIR }}" -BackupPath "${{ env.BACKUP_DIR }}\source\frontend" -HandleLockedFiles $false
+          Backup-Files -SourcePath "${{ env.BACKEND_SOURCE_DIR }}" -BackupPath "${{ env.BACKUP_DIR }}\source\backend" -HandleLockedFiles $true
+          Backup-Files -SourcePath "${{ env.DEPLOY_DIR }}" -BackupPath "${{ env.BACKUP_DIR }}\deploy\backend" -HandleLockedFiles $true
+
+      ### 5. 최신 소스 코드 가져오기
+      - name: Checkout Source Code
+        shell: powershell
+        run: |
+          $branch = 'main'
+          if (Test-Path -Path "${{ env.FRONTEND_SOURCE_DIR }}") {
+              Remove-Item -Path "${{ env.FRONTEND_SOURCE_DIR }}" -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Output "✅ Removed existing frontend source directory: ${{ env.FRONTEND_SOURCE_DIR }}"
+          }
+          Write-Output "🔄 Cloning frontend repository from: ${{ env.FRONTEND_REPO_URL }} (branch: $branch)"
+          git clone --branch $branch "${{ env.FRONTEND_REPO_URL }}" "${{ env.FRONTEND_SOURCE_DIR }}"
+          Write-Output "✅ Frontend source code cloned to: ${{ env.FRONTEND_SOURCE_DIR }}"
+          if (Test-Path -Path "${{ env.BACKEND_SOURCE_DIR }}") {
+              Remove-Item -Path "${{ env.BACKEND_SOURCE_DIR }}" -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Output "✅ Removed existing backend source directory: ${{ env.BACKEND_SOURCE_DIR }}"
+          }
+          Write-Output "🔄 Cloning backend repository from: ${{ env.BACKEND_REPO_URL }} (branch: $branch)"
+          git clone --branch $branch "${{ env.BACKEND_REPO_URL }}" "${{ env.BACKEND_SOURCE_DIR }}"
+          Write-Output "✅ Backend source code cloned to: ${{ env.BACKEND_SOURCE_DIR }}"
+
+      ### 6. .env 파일 복사
+      - name: Copy .env Files
+        shell: powershell
+        run: |
+          $frontendEnvSource = 'D:\workspace\netcore\env\frontend.env.production'
+          $frontendEnvDest = 'D:\workspace\netcore\source\frontend\.env.production'
+          $backendEnvSource = 'D:\workspace\netcore\env\backend.env'
+          $backendEnvDest = 'D:\workspace\netcore\source\backend\.env'
+          if (Test-Path -Path $frontendEnvSource) {
+              Copy-Item -Path $frontendEnvSource -Destination $frontendEnvDest -Force
+              Write-Output "✅ Frontend .env file copied to: $frontendEnvDest"
+          } else {
+              Write-Output "❌ Frontend .env source file not found: $frontendEnvSource"
+              exit 1
+          }
+          if (Test-Path -Path $backendEnvSource) {
+              Copy-Item -Path $backendEnvSource -Destination $backendEnvDest -Force
+              Write-Output "✅ Backend .env file copied to: $backendEnvDest"
+          } else {
+              Write-Output "❌ Backend .env source file not found: $backendEnvSource"
+              exit 1
+          }
+
+      ### 7. 프론트엔드 빌드
+      - name: Build Frontend
+        shell: powershell
+        run: |
+          cd "${{ env.FRONTEND_SOURCE_DIR }}"
+          Write-Output "📦 Installing frontend dependencies..."
+          npm install
+          Write-Output "⚙️ Starting frontend production build..."
+          npm run build
+          if ($?) {
+              Write-Output "✅ Frontend build completed successfully."
+          } else {
+              Write-Error "❌ Frontend build failed."
+              exit 1
+          }
+
+      ### 8. 프론트엔드 빌드 결과 복사
+      - name: Copy Frontend Build to Backend
+        shell: powershell
+        run: |
+          $buildOutput = "${{ env.FRONTEND_SOURCE_DIR }}/dist"
+          $staticDir = "${{ env.BACKEND_SOURCE_DIR }}\src\main\resources\static"
+          if (Test-Path -Path $buildOutput) {
+              if (Test-Path -Path $staticDir) {
+                  Remove-Item -Path "$staticDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              New-Item -ItemType Directory -Path $staticDir -Force
+              Copy-Item -Path "$buildOutput\*" -Destination $staticDir -Recurse -Force
+              # index.html을 404.html로 복사
+              $indexHtml = Join-Path -Path $buildOutput -ChildPath "index.html"
+              $404Html = Join-Path -Path $staticDir -ChildPath "404.html"
+              if (Test-Path -Path $indexHtml) {
+                  Copy-Item -Path $indexHtml -Destination $404Html -Force
+                  Write-Output "✅ Copied index.html to 404.html in $staticDir"
+              } else {
+                  Write-Error "❌ index.html not found in $buildOutput"
+                  exit 1
+              }
+              Write-Output "✅ Frontend build files copied to: $staticDir"
+          } else {
+              Write-Error "❌ Frontend build output not found: $buildOutput"
+              exit 1
+          }
+
+      ### 9. 백엔드 빌드
+      - name: Build Backend
+        shell: powershell
+        run: |
+          cd "${{ env.BACKEND_SOURCE_DIR }}"
+          Write-Output "⚙️ Starting backend build..."
+          gradle clean build -x test
+          if ($?) {
+              Write-Output "✅ Backend build completed successfully."
+          } else {
+              Write-Error "❌ Backend build failed."
+              exit 1
+          }
+
+      ### 10. 빌드 결과물 배포 디렉터리로 복사
+      - name: Deploy Built JAR
+        shell: powershell
+        run: |
+          $sourceDir = "${{ env.BACKEND_SOURCE_DIR }}\build\libs"
+          $deployDir = "${{ env.DEPLOY_DIR }}"
+          $envFilePath = "${{ env.BACKEND_SOURCE_DIR }}\.env"
+          Write-Output "📂 Deploying built JAR files to deployment directory..."
+          $jarFile = (Get-ChildItem -Path $sourceDir -Filter '*.jar' | Where-Object { $_.Name -notlike '*-plain.jar' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+          if (-not $jarFile) {
+              Write-Error "❌ No executable JAR file found in: $sourceDir"
+              exit 1
+          }
+          if (Test-Path -Path $deployDir) {
+              Remove-Item -Path "$deployDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+          } else {
+              New-Item -ItemType Directory -Path $deployDir -Force
+          }
+          Copy-Item -Path $jarFile -Destination $deployDir -Force
+          if (Test-Path -Path $envFilePath) {
+              Copy-Item -Path $envFilePath -Destination $deployDir -Force
+              Write-Output "✅ .env file copied to: $deployDir"
+          }
+          Write-Output "✅ Build files deployed to: $deployDir"
+
+      ### 11. 백엔드 서비스 재시작
+      - name: Restart Backend Service
+        shell: powershell
+        run: |
+          Write-Output "🔄 Attempting to restart the backend service: ${{ env.BACKEND_SERVICE_NAME }}"
+          $serviceStatus = (Get-Service -Name "${{ env.BACKEND_SERVICE_NAME }}" -ErrorAction SilentlyContinue).Status
+          if (-not $serviceStatus) {
+              Write-Error "❌ Service '${{ env.BACKEND_SERVICE_NAME }}' not found."
+              exit 1
+          }
+          try {
+              if ($serviceStatus -eq 'Running') {
+                  Restart-Service -Name "${{ env.BACKEND_SERVICE_NAME }}" -Force
+                  Start-Sleep -Seconds 5
+                  $currentStatus = (Get-Service -Name "${{ env.BACKEND_SERVICE_NAME }}").Status
+                  if ($currentStatus -eq 'Running') {
+                      Write-Output "✅ Service '${{ env.BACKEND_SERVICE_NAME }}' restarted successfully."
+                  } else {
+                      Write-Error "❌ Service '${{ env.BACKEND_SERVICE_NAME }}' failed to start."
+                      exit 1
+                  }
+              } else {
+                  Start-Service -Name "${{ env.BACKEND_SERVICE_NAME }}"
+                  Start-Sleep -Seconds 5
+                  $currentStatus = (Get-Service -Name "${{ env.BACKEND_SERVICE_NAME }}").Status
+                  if ($currentStatus -eq 'Running') {
+                      Write-Output "✅ Service '${{ env.BACKEND_SERVICE_NAME }}' started successfully."
+                  } else {
+                      Write-Error "❌ Service '${{ env.BACKEND_SERVICE_NAME }}' failed to start."
+                      exit 1
+                  }
+              }
+          } catch {
+              Write-Error "❌ Error while restarting service '${{ env.BACKEND_SERVICE_NAME }}': $($_.Exception.Message)"
+              exit 1
+          }
+
+      ### 12. Nginx 서비스 재시작
+      - name: Restart Nginx Service
+        shell: powershell
+        run: |
+          Write-Output "🔄 Restarting Nginx service..."
+          try {
+              if ((Get-Service -Name "${{ env.NGINX_SERVICE_NAME }}").Status -eq "Running") {
+                  Restart-Service -Name "${{ env.NGINX_SERVICE_NAME }}" -Force
+                  Write-Output "✅ Nginx service restarted successfully."
+              } else {
+                  Start-Service -Name "${{ env.NGINX_SERVICE_NAME }}"
+                  Write-Output "✅ Nginx service started successfully."
+              }
+          } catch {
+              Write-Error "❌ Failed to restart Nginx service. Error: $_"
+              exit 1
+          }
