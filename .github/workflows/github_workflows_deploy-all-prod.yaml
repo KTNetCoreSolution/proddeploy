@@ -25,6 +25,11 @@ jobs:
     runs-on: [self-hosted, Windows, X64, deploy-prod]
 
     steps:
+      ### 0. 명령 실행 정책 변경
+      - name: Set Execution Policy
+        shell: powershell
+        run: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+        
       ### 1. Node.js 버전 확인
       - name: Verify Node.js Installation
         shell: powershell
