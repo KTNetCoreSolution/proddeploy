@@ -14,6 +14,7 @@ env:
   FRONTEND_REPO_URL: https://${{ secrets.GITHUB_ACTOR }}:${{ secrets.KTNETCOREACTION }}@github.com/KTNetCoreSolution/frontend.git
   BACKEND_REPO_URL: https://${{ secrets.GITHUB_ACTOR }}:${{ secrets.KTNETCOREACTION }}@github.com/KTNetCoreSolution/backend.git
   BACKEND_SERVICE_NAME: Run_backend_service
+  BACKEND_MOBILE_SERVICE_NAME: Run_backend_mobile_service
   NGINX_SERVICE_NAME: Nginx
 
 permissions:
@@ -280,8 +281,45 @@ jobs:
               Write-Error "❌ Error while restarting service '${{ env.BACKEND_SERVICE_NAME }}': $($_.Exception.Message)"
               exit 1
           }
+          
+      ### 12. 모바일 백엔드 서비스 재시작
+      - name: Restart Mobile Backend Service
+        shell: powershell
+        run: |
+          Write-Output "🔄 Attempting to restart the mobile backend service: ${{ env.BACKEND_MOBILE_SERVICE_NAME }}"
+          $serviceStatus = (Get-Service -Name "${{ env.BACKEND_MOBILE_SERVICE_NAME }}" -ErrorAction SilentlyContinue).Status
+          if (-not $serviceStatus) {
+              Write-Error "❌ Service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}' not found."
+              exit 1
+          }
+          try {
+              if ($serviceStatus -eq 'Running') {
+                  Restart-Service -Name "${{ env.BACKEND_MOBILE_SERVICE_NAME }}" -Force
+                  Start-Sleep -Seconds 5
+                  $currentStatus = (Get-Service -Name "${{ env.BACKEND_MOBILE_SERVICE_NAME }}").Status
+                  if ($currentStatus -eq 'Running') {
+                      Write-Output "✅ Service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}' restarted successfully."
+                  } else {
+                      Write-Error "❌ Service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}' failed to start."
+                      exit 1
+                  }
+              } else {
+                  Start-Service -Name "${{ env.BACKEND_MOBILE_SERVICE_NAME }}"
+                  Start-Sleep -Seconds 5
+                  $currentStatus = (Get-Service -Name "${{ env.BACKEND_MOBILE_SERVICE_NAME }}").Status
+                  if ($currentStatus -eq 'Running') {
+                      Write-Output "✅ Service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}' started successfully."
+                  } else {
+                      Write-Error "❌ Service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}' failed to start."
+                      exit 1
+                  }
+              }
+          } catch {
+              Write-Error "❌ Error while restarting service '${{ env.BACKEND_MOBILE_SERVICE_NAME }}': $($_.Exception.Message)"
+              exit 1
+          }
 
-      ### 12. Nginx 서비스 재시작
+      ### 13. Nginx 서비스 재시작
       - name: Restart Nginx Service
         shell: powershell
         run: |
